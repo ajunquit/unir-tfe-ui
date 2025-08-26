@@ -92,6 +92,12 @@ jobs:
         env:
           NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Restore
+        run: |
+          dotnet restore \
+            --source "https://api.nuget.org/v3/index.json" \
+            --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
       - name: Set up dependency caching for faster builds
         uses: actions/cache@v3
         with:
