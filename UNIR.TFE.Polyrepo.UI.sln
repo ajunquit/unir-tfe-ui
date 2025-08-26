@@ -1,0 +1,46 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36408.4
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{02EA681E-C7D8-13C7-8484-4AC65E1B71E8}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "test", "test", "{E57E269B-463E-4320-A296-02E6035FACB3}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "UNIR.TFE.Polyrepo.UI", "src\UNIR.TFE.Polyrepo.UI\UNIR.TFE.Polyrepo.UI.csproj", "{156638C4-7F31-FBA4-5EC6-A8ED596704F7}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "UNIR.TFE.Polyrepo.Orchestrator.Module", "src\UNIR.TFE.Polyrepo.Orchestrator\src\UNIR.TFE.Polyrepo.Orchestrator.Module\UNIR.TFE.Polyrepo.Orchestrator.Module.csproj", "{FFA85297-31EC-A02B-79EF-811903894A25}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "UNIR.TFE.Polyrepo.UI.Test", "test\UNIR.TFE.Polyrepo.UI.Test\UNIR.TFE.Polyrepo.UI.Test.csproj", "{245A4CE2-E607-40CA-8368-72B51769834D}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{156638C4-7F31-FBA4-5EC6-A8ED596704F7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{156638C4-7F31-FBA4-5EC6-A8ED596704F7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{156638C4-7F31-FBA4-5EC6-A8ED596704F7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{156638C4-7F31-FBA4-5EC6-A8ED596704F7}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FFA85297-31EC-A02B-79EF-811903894A25}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FFA85297-31EC-A02B-79EF-811903894A25}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FFA85297-31EC-A02B-79EF-811903894A25}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FFA85297-31EC-A02B-79EF-811903894A25}.Release|Any CPU.Build.0 = Release|Any CPU
+		{245A4CE2-E607-40CA-8368-72B51769834D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{245A4CE2-E607-40CA-8368-72B51769834D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{245A4CE2-E607-40CA-8368-72B51769834D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{245A4CE2-E607-40CA-8368-72B51769834D}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{156638C4-7F31-FBA4-5EC6-A8ED596704F7} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{FFA85297-31EC-A02B-79EF-811903894A25} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{245A4CE2-E607-40CA-8368-72B51769834D} = {E57E269B-463E-4320-A296-02E6035FACB3}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {5D6361E3-EC0A-4ECA-B403-30B499B12954}
+	EndGlobalSection
+EndGlobal

@@ -1,0 +1,152 @@
+﻿﻿@using UNIR.TFE.Polyrepo.UI.Models.Common
+@model CalculatorModel
+
+@{
+    ViewData["Title"] = "Home Page";
+}
+
+<div class="container mt-5">
+    <h1 class="text-center mb-4">Calculadora</h1>
+
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <form asp-action="Calculate" method="post" class="card p-4 shadow">
+                <div class="mb-3">
+                    <label asp-for="Number1" class="form-label">Primer Número</label>
+                    <input asp-for="Number1" class="form-control" type="number" />
+                    <span asp-validation-for="Number1" class="text-danger"></span>
+                </div>
+
+                <div class="mb-3">
+                    <label asp-for="Operation" class="form-label">Operación</label>
+                    <select asp-for="Operation" class="form-select">
+                        <option value="Addition">Suma (+)</option>
+                        <option value="Subtraction">Resta (-)</option>
+                        <option value="Multiplication">Multiplicación (*)</option>
+                        <option value="Division">División (/)</option>
+                    </select>
+                </div>
+
+                <div class="mb-3">
+                    <label asp-for="Number2" class="form-label">Segundo Número</label>
+                    <input asp-for="Number2" class="form-control" type="number" />
+                    <span asp-validation-for="Number2" class="text-danger"></span>
+                </div>
+
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-primary">Calcular</button>
+                </div>
+
+                @if (Model?.Result != null)
+                {
+                    <div class="alert alert-success mt-3">
+                        <h4 class="alert-heading">Resultado</h4>
+                        <p>@Model.Number1 @GetOperationSymbol(Model.Operation) @Model.Number2 = @Model.Result</p>
+                    </div>
+                }
+
+                @if (ViewData.ModelState.ErrorCount > 0)
+                {
+                    <div class="alert alert-danger mt-3">
+                        <h4 class="alert-heading">Error</h4>
+                        <div asp-validation-summary="All"></div>
+                    </div>
+                }
+            </form>
+        </div>
+    </div>
+
+    <!-- Sección para mostrar la información de Git -->
+    @if (Model?.GitModel != null)
+    {
+        <div class="row justify-content-center mt-5">
+            <div class="col-md-10">
+                <div class="card shadow">
+                    <div class="card-header bg-light">
+                        <h3 class="card-title">Información del Repositorio Git</h3>
+                    </div>
+                    <div class="card-body">
+                        @if (Model.GitModel.Superproject != null)
+                        {
+                            <div class="mb-4">
+                                <h4>Superproyecto</h4>
+                                <div class="table-responsive">
+                                    <table class="table table-bordered">
+                                        <tr>
+                                            <th>Nombre</th>
+                                            <td>@Model.GitModel.Superproject.Path</td>
+                                        </tr>
+                                        <tr>
+                                            <th>URL</th>
+                                            <td>@Model.GitModel.Superproject.Url</td>
+                                        </tr>
+                                        <tr>
+                                            <th>Commit</th>
+                                            <td>@Model.GitModel.Superproject.Sha</td>
+                                        </tr>
+                                        <tr>
+                                            <th>Ruta</th>
+                                            <td>@Model.GitModel.Superproject.Path</td>
+                                        </tr>
+                                    </table>
+                                </div>
+                            </div>
+                        }
+
+                        @if (Model.GitModel.Submodules != null && Model.GitModel.Submodules.Any())
+                        {
+                            <div>
+                                <h4>Submódulos</h4>
+                                <div class="table-responsive">
+                                    <table class="table table-bordered table-striped">
+                                        <thead>
+                                            <tr>
+                                                <th>Nombre</th>
+                                                <th>URL</th>
+                                                <th>Commit</th>
+                                                <th>Ruta</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var submodule in Model.GitModel.Submodules)
+                                            {
+                                                <tr>
+                                                    <td>@submodule.Path</td>
+                                                    <td>@submodule.Url</td>
+                                                    <td>@submodule.Sha</td>
+                                                    <td>@submodule.Path</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="alert alert-info">No hay submódulos disponibles.</div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@functions {
+    string GetOperationSymbol(string operation)
+    {
+        return operation switch
+        {
+            "Addition" => "+",
+            "Subtraction" => "-",
+            "Multiplication" => "*",
+            "Division" => "/",
+            _ => "?"
+        };
+    }
+}
+
+@section Scripts {
+    <partial name="_ValidationScriptsPartial" />
+}
