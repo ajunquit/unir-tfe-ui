@@ -10,6 +10,10 @@ on:
     branches: [ "main" ]
   repository_dispatch:
     types: [trigger-white-label-pipeline]
+    
+permissions:
+  contents: read
+  packages: read
 
 jobs:
   build-and-test:
@@ -22,13 +26,18 @@ jobs:
         submodules: 'true'  # Esto es clave para descargar submódulos
         fetch-depth: 0      # Opcional: descarga todo el historial para submódulos
         
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 8.0.x
+    - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+          source-url: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+        env:
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         
-    - name: Restore dependencies
-      run: dotnet restore
+    - name: Restore
+        run: |
+          dotnet restore \
+            --source "https://api.nuget.org/v3/index.json" \
+            --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
       
     - name: Build
       run: dotnet build --no-restore
