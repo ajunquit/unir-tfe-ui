@@ -2,7 +2,7 @@ name: cd-deploy-azure
 
 on:
   workflow_run:
-    workflows: [ "ci-build-test" ]
+    workflows: [ "ci-default" ]
     types: [ completed ]
     branches: [ "main" ]  # asegura que sólo despliegue si el CI vino de main
 
