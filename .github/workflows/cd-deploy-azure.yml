@@ -34,15 +34,29 @@ jobs:
           repo: ${{ github.repository }}
           if_no_artifact_found: fail
 
+      - name: Download deploy metadata (optional)
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          run_id: ${{ github.event.workflow_run.id }}
+          name: deploy-metadata
+          path: ./meta
+          repo: ${{ github.repository }}
+          if_no_artifact_found: ignore
+
+      - name: Read metadata and override vars (if present)
+        if: ${{ hashFiles('./meta/deploy-metadata.json') != '' }}
+        run: |
+          echo "AZURE_WEBAPP_NAME_OVERRIDE=$(jq -r '.azure_webapp_name // empty' ./meta/deploy-metadata.json)" >> $GITHUB_ENV
+        shell: bash
+
       - name: Azure Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          # Alternativa: usa publish-profile en el deploy y omite este paso.
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
         uses: azure/webapps-deploy@v2
         with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          app-name: ${{ env.AZURE_WEBAPP_NAME_OVERRIDE || env.AZURE_WEBAPP_NAME }}
           package: ./app
