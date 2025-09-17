@@ -97,7 +97,7 @@ jobs:
           aws elasticbeanstalk create-application-version \
             --application-name "${{ env.APP_NAME }}" \
             --version-label "${{ env.VERSION_LABEL }}" \
-            --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ env.APP_NAME }}/${{ env.VERSION_LABEL }}.zip"
+            --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ env.VERSION_LABEL }}.zip"
 
       - name: Update GREEN environment
         run: |
