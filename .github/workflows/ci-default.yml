@@ -5,6 +5,8 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  repository_dispatch:
+    types: [ trigger-white-label-pipeline ]
 
 permissions:
   contents: read
@@ -61,3 +63,25 @@ jobs:
           name: net-app
           path: ${{ github.workspace }}/publish
           if-no-files-found: error
+          
+      # --- si viene del white-label, empaqueta metadata para el CD ---
+      - name: Export deploy metadata (only for repository_dispatch)
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        run: |
+          jq -n \
+            --arg env   "${{ github.event.client_payload.environment || 'Development' }}" \
+            --arg app   "${{ github.event.client_payload.azure_webapp_name || '' }}" \
+            --arg ref   "${{ github.event.client_payload.ref || 'main' }}" \
+            --arg rtag  "${{ github.event.client_payload.release_tag || '' }}" \
+            --arg murl  "${{ github.event.client_payload.manifest_url || '' }}" \
+            '{environment:$env, azure_webapp_name:$app, ref:$ref, release_tag:$rtag, manifest_url:$murl}' \
+            > deploy-metadata.json
+        shell: bash
+
+      - name: Upload deploy metadata
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-metadata
+          path: deploy-metadata.json
+          if-no-files-found: ignore
