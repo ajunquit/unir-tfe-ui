@@ -1,4 +1,4 @@
-# despliegue a green
+# despliegue blue/green (deploy siempre al inactivo)
 name: deploy-blue-green-eb
 
 on:
@@ -13,9 +13,14 @@ on:
         description: "Si source=run_id, indica el run_id del workflow ci-default"
         required: false
       swap:
-        description: "Hacer swap Blue -> Green si /health está OK"
+        description: "Hacer swap si /health está OK"
         type: boolean
         default: true
+      active_override:
+        description: "Forzar entorno ACTIVO (auto/blue/green)"
+        type: choice
+        options: [auto, blue, green]
+        default: auto
 
 env:
   AWS_REGION: us-east-2
@@ -24,10 +29,11 @@ env:
   GREEN_ENV: green-environment
   S3_BUCKET: elasticbeanstalk-us-east-2-987686462366
   HEALTH_PATH: /health
-  SCHEME: http   # <-- usa https si ya tienes cert
+  SCHEME: http                 # usa https si ya tienes cert
+  PARAM_ACTIVE_ENV: /unir-tfe/eb/active-env   # guarda "blue" o "green"
 
 jobs:
-  deploy-green:
+  deploy-eb:
     runs-on: ubuntu-latest
     environment: staging
     concurrency:
@@ -57,7 +63,7 @@ jobs:
         if: ${{ inputs.source == 'latest_main' }}
         uses: dawidd6/action-download-artifact@v3
         with:
-          workflow: ci-default.yml   # o el name: ci-default
+          workflow: ci-default.yml
           workflow_conclusion: success
           branch: main
           name: net-app
@@ -89,8 +95,7 @@ jobs:
         run: echo "VERSION_LABEL=${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}-$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
 
       - name: Upload bundle to S3
-        run: |
-          aws s3 cp app.zip "s3://${{ env.S3_BUCKET }}/${{ env.VERSION_LABEL }}.zip"
+        run: aws s3 cp app.zip "s3://${{ env.S3_BUCKET }}/${{ env.VERSION_LABEL }}.zip"
 
       - name: Create EB application version
         run: |
@@ -99,36 +104,11 @@ jobs:
             --version-label "${{ env.VERSION_LABEL }}" \
             --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ env.VERSION_LABEL }}.zip"
 
-      - name: Update GREEN environment
+      # === Detección de ACTIVO y cálculo de INACTIVO ===
+      - name: Read ACTIVE_ENV (SSM) / override
+        id: active
+        continue-on-error: true
         run: |
-          aws elasticbeanstalk update-environment \
-            --environment-name "${{ env.GREEN_ENV }}" \
-            --version-label "${{ env.VERSION_LABEL }}"
-
-      - name: Wait for GREEN to finish updating
-        run: |
-          aws elasticbeanstalk wait environment-updated --environment-names "${{ env.GREEN_ENV }}"
-
-      - name: HTTP health check (/health)
-        run: |
-          CNAME=$(aws elasticbeanstalk describe-environments \
-            --environment-names "${{ env.GREEN_ENV }}" \
-            --query "Environments[0].CNAME" --output text)
-          URL="${{ env.SCHEME }}://${CNAME}${{ env.HEALTH_PATH }}"
-          echo "Checking $URL ..."
-          for i in {1..30}; do
-            if curl -fsS "$URL" >/dev/null; then
-              echo "GREEN healthy"
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "Health check failed" >&2
-          exit 1
-
-      - name: Swap BLUE -> GREEN
-        if: ${{ inputs.swap }}
-        run: |
-          aws elasticbeanstalk swap-environment-cnames \
-            --source-environment-name "${{ env.BLUE_ENV }}" \
-            --destination-environment-name "${{ env.GREEN_ENV }}"
+          # 1) override manual
+          if [ "${{ inputs.active_override }}" != "auto" ]; then
+            echo "ACTI
