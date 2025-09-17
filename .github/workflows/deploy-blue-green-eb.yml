@@ -1,0 +1,77 @@
+name: deploy-blue-green-eb
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+env:
+  AWS_REGION: us-east-1
+  APP: myapp
+  BLUE_ENV: myapp-blue
+  GREEN_ENV: myapp-green
+  S3_BUCKET: myapp-bundles
+  HEALTH_PATH: /health
+
+jobs:
+  deploy-green:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      - name: Build & Publish
+        run: |
+          dotnet publish ./src/MyApp.csproj -c Release -o publish
+          cd publish && zip -r ../app.zip . && cd ..
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload bundle to S3
+        run: |
+          VERSION_LABEL=$(date +%Y%m%d%H%M%S)
+          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
+          aws s3 cp app.zip "s3://${{ env.S3_BUCKET }}/${{ env.APP }}/${VERSION_LABEL}.zip"
+
+      - name: Create EB application version
+        run: |
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ env.APP }}" \
+            --version-label "${{ env.VERSION_LABEL }}" \
+            --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ env.APP }}/${{ env.VERSION_LABEL }}.zip"
+
+      - name: Update GREEN environment
+        run: |
+          aws elasticbeanstalk update-environment \
+            --environment-name "${{ env.GREEN_ENV }}" \
+            --version-label "${{ env.VERSION_LABEL }}"
+
+      - name: Wait for GREEN health (OK)
+        run: |
+          GREEN_URL=$(aws elasticbeanstalk describe-environments \
+            --environment-names "${{ env.GREEN_ENV }}" \
+            --query "Environments[0].CNAME" --output text)
+          echo "GREEN_URL=https://${GREEN_URL}" >> $GITHUB_ENV
+          for i in {1..30}; do
+            if curl -fsS "${GREEN_URL}${{ env.HEALTH_PATH }}"; then
+              echo "GREEN healthy"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "GREEN not healthy" && exit 1
+
+      - name: Swap Blue -> Green
+        if: ${{ success() }}
+        run: |
+          aws elasticbeanstalk swap-environment-cnames \
+            --source-environment-name "${{ env.BLUE_ENV }}" \
+            --destination-environment-name "${{ env.GREEN_ENV }}"
