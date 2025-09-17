@@ -1,4 +1,4 @@
-name: cd-deploy-azure
+name: cd-azure-deploy
 
 on:
   workflow_run:
