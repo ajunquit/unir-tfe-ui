@@ -1,53 +1,76 @@
 # despliegue a green
 name: deploy-blue-green-eb
+
 on:
   workflow_dispatch:
+    inputs:
+      swap:
+        description: 'Hacer swap Blue -> Green al final si /health está OK'
+        type: boolean
+        default: true
   push:
     branches: [ "main" ]
 
 env:
-  AWS_REGION: us-east-1
-  APP: myapp
-  BLUE_ENV: myapp-blue
-  GREEN_ENV: myapp-green
-  S3_BUCKET: myapp-bundles
-  HEALTH_PATH: /health
+  AWS_REGION: us-east-2                 # <- región de tu EB (Ohio en tu screenshot)
+  APP_NAME: unir-tfe-blue-green         # <- nombre de tu Application en EB
+  BLUE_ENV: blue-environment            # <- nombre del entorno "Blue"
+  GREEN_ENV: green-environment          # <- nombre del entorno "Green"
+  S3_BUCKET: unir-tfe-bundles           # <- bucket para subir el ZIP
+  HEALTH_PATH: /health                  # <- endpoint de salud de tu app
+  SCHEME: https                         # <- usa http si no tienes certs
 
 jobs:
   deploy-green:
     runs-on: ubuntu-latest
+    environment: staging
+    concurrency:
+      group: eb-deploy
+      cancel-in-progress: false
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.x'
 
-      - name: Build & Publish
+      - name: Build, publish and package
         run: |
-          dotnet publish ./src/MyApp.csproj -c Release -o publish
+          dotnet publish ./src/UNIR.TFE.Polyrepo.UI/UNIR.TFE.Polyrepo.UI.csproj -c Release -o publish
+          cp -r .ebextensions publish/.ebextensions
           cd publish && zip -r ../app.zip . && cd ..
 
-      - name: Configure AWS credentials
+      # Recomendado: OIDC (sin keys), crea un rol en AWS y guarda su ARN en el secret AWS_OIDC_ROLE_ARN
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      # Alternativa con keys (si no usas OIDC), comenta el bloque anterior y descomenta este:
+      # - name: Configure AWS credentials (keys)
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set version label
+        run: echo "VERSION_LABEL=${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}-$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
 
       - name: Upload bundle to S3
         run: |
-          VERSION_LABEL=$(date +%Y%m%d%H%M%S)
-          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
-          aws s3 cp app.zip "s3://${{ env.S3_BUCKET }}/${{ env.APP }}/${VERSION_LABEL}.zip"
+          aws s3 cp app.zip "s3://${{ env.S3_BUCKET }}/${{ env.APP_NAME }}/${{ env.VERSION_LABEL }}.zip"
 
       - name: Create EB application version
         run: |
           aws elasticbeanstalk create-application-version \
-            --application-name "${{ env.APP }}" \
+            --application-name "${{ env.APP_NAME }}" \
             --version-label "${{ env.VERSION_LABEL }}" \
-            --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ env.APP }}/${{ env.VERSION_LABEL }}.zip"
+            --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ env.APP_NAME }}/${{ env.VERSION_LABEL }}.zip"
 
       - name: Update GREEN environment
         run: |
@@ -55,23 +78,29 @@ jobs:
             --environment-name "${{ env.GREEN_ENV }}" \
             --version-label "${{ env.VERSION_LABEL }}"
 
-      - name: Wait for GREEN health (OK)
+      - name: Wait for GREEN environment to finish updating
         run: |
-          GREEN_URL=$(aws elasticbeanstalk describe-environments \
+          aws elasticbeanstalk wait environment-updated --environment-names "${{ env.GREEN_ENV }}"
+
+      - name: HTTP health check (/health)
+        run: |
+          CNAME=$(aws elasticbeanstalk describe-environments \
             --environment-names "${{ env.GREEN_ENV }}" \
             --query "Environments[0].CNAME" --output text)
-          echo "GREEN_URL=https://${GREEN_URL}" >> $GITHUB_ENV
+          URL="${{ env.SCHEME }}://${CNAME}${{ env.HEALTH_PATH }}"
+          echo "Checking $URL ..."
           for i in {1..30}; do
-            if curl -fsS "${GREEN_URL}${{ env.HEALTH_PATH }}"; then
+            if curl -fsS "$URL" >/dev/null; then
               echo "GREEN healthy"
               exit 0
             fi
             sleep 10
           done
-          echo "GREEN not healthy" && exit 1
+          echo "Health check failed" >&2
+          exit 1
 
-      - name: Swap Blue -> Green
-        if: ${{ success() }}
+      - name: Swap BLUE -> GREEN
+        if: ${{ github.event.inputs.swap != 'false' }}
         run: |
           aws elasticbeanstalk swap-environment-cnames \
             --source-environment-name "${{ env.BLUE_ENV }}" \
