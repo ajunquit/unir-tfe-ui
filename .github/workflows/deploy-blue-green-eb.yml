@@ -22,7 +22,7 @@ env:
   APP_NAME: unir-tfe-blue-green         # Nombre de la Application en EB
   BLUE_ENV: blue-environment            # Entorno Blue
   GREEN_ENV: green-environment          # Entorno Green
-  S3_BUCKET: unir-tfe-bundles           # Bucket donde subiremos el ZIP
+  S3_BUCKET: elasticbeanstalk-us-east-2-987686462366           # Bucket donde subiremos el ZIP
   HEALTH_PATH: /health                  # Endpoint de salud
   SCHEME: https
 
