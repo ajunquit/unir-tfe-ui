@@ -1,0 +1,177 @@
+# despliegue blue/green (deploy siempre al inactivo)
+name: deploy-blue-green-eb
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "De dónde obtener el artefacto de ci-default"
+        type: choice
+        options: [latest_main, run_id]
+        default: latest_main
+      artifact_run_id:
+        description: "Si source=run_id, indica el run_id del workflow ci-default"
+        required: false
+      swap:
+        description: "Hacer swap si /health está OK"
+        type: boolean
+        default: true
+      active_override:
+        description: "Forzar ACTIVO (auto/blue/green) — usar 1 sola vez para bootstrap"
+        type: choice
+        options: [auto, blue, green]
+        default: auto
+
+env:
+  AWS_REGION: us-east-2
+  APP_NAME: unir-tfe-blue-green
+  BLUE_ENV: blue-environment
+  GREEN_ENV: green-environment
+  S3_BUCKET: elasticbeanstalk-us-east-2-987686462366
+  HEALTH_PATH: /health
+  SCHEME: http
+  PARAM_ACTIVE_ENV: /unir-tfe-ui/eb/active-env
+
+jobs:
+  deploy-eb:
+    runs-on: ubuntu-latest
+    environment: staging
+    concurrency:
+      group: eb-deploy
+      cancel-in-progress: true
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+      packages: read
+
+    steps:
+      - name: Checkout (solo para .ebextensions)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-${{ github.run_id }}
+
+      # A) Último run exitoso en main
+      - name: Download artifact from latest successful on main
+        if: ${{ inputs.source == 'latest_main' }}
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: ci-default.yml
+          workflow_conclusion: success
+          branch: main
+          name: net-app
+          path: app_publish
+
+      # B) run_id específico
+      - name: Download artifact by run_id
+        if: ${{ inputs.source == 'run_id' && inputs.artifact_run_id != '' }}
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          run_id: ${{ inputs.artifact_run_id }}
+          name: net-app
+          path: app_publish
+
+      - name: Fail if artifact is empty
+        run: |
+          test -d app_publish && test "$(ls -A app_publish)" || \
+          (echo "Artifact 'net-app' no encontrado o vacío" && exit 1)
+
+      - name: Inject .ebextensions and zip
+        run: |
+          if [ -d ".ebextensions" ]; then
+            cp -r .ebextensions app_publish/.ebextensions
+          fi
+          cd app_publish && zip -r ../app.zip . && cd ..
+          ls -lh app.zip
+
+      - name: Set VERSION_LABEL (único)
+        run: echo "VERSION_LABEL=${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}-$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
+
+      - name: Upload bundle to S3
+        run: aws s3 cp app.zip "s3://${{ env.S3_BUCKET }}/${{ env.APP_NAME }}/${{ env.VERSION_LABEL }}.zip"
+
+      - name: Create EB application version
+        run: |
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ env.APP_NAME }}" \
+            --version-label "${{ env.VERSION_LABEL }}" \
+            --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ env.APP_NAME }}/${{ env.VERSION_LABEL }}.zip"
+
+      # ===== Descubrir ACTIVO y calcular INACTIVO =====
+      - name: Read ACTIVE_ENV (SSM) / override
+        id: active
+        continue-on-error: true
+        run: |
+          if [ "${{ inputs.active_override }}" != "auto" ]; then
+            echo "ACTIVE_ENV=${{ inputs.active_override }}" >> $GITHUB_ENV
+            echo ">> ACTIVE_ENV (override) = ${{ inputs.active_override }}"
+            exit 0
+          fi
+          ACTIVE=$(aws ssm get-parameter --name "${{ env.PARAM_ACTIVE_ENV }}" \
+            --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+          if [ -z "$ACTIVE" ]; then
+            # Heurística de arranque: si el CNAME de GREEN contiene 'blue-environment', asumimos green activo.
+            G_CNAME=$(aws elasticbeanstalk describe-environments \
+              --environment-names "${{ env.GREEN_ENV }}" \
+              --query "Environments[0].CNAME" --output text || echo "")
+            if echo "$G_CNAME" | grep -q "blue-environment"; then ACTIVE="green"; else ACTIVE="blue"; fi
+            echo ">> ACTIVE_ENV (bootstrap) = $ACTIVE"
+          else
+            echo ">> ACTIVE_ENV (SSM) = $ACTIVE"
+          fi
+          echo "ACTIVE_ENV=$ACTIVE" >> $GITHUB_ENV
+
+      - name: Compute TARGET_ENV (inactive)
+        run: |
+          if [ "${ACTIVE_ENV}" = "blue" ]; then
+            TARGET="${{ env.GREEN_ENV }}"
+          else
+            TARGET="${{ env.BLUE_ENV }}"
+          fi
+          echo "TARGET_ENV=$TARGET" >> $GITHUB_ENV
+          echo ">> Deploy target = $TARGET"
+
+      # ===== Deploy al INACTIVO =====
+      - name: Update TARGET environment (inactive)
+        run: |
+          aws elasticbeanstalk update-environment \
+            --environment-name "$TARGET_ENV" \
+            --version-label "${{ env.VERSION_LABEL }}"
+
+      - name: Wait for TARGET to finish updating
+        run: aws elasticbeanstalk wait environment-updated --environment-names "$TARGET_ENV"
+
+      - name: HTTP health check (/health) on TARGET
+        run: |
+          CNAME=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$TARGET_ENV" \
+            --query "Environments[0].CNAME" --output text)
+          URL="${{ env.SCHEME }}://${CNAME}${{ env.HEALTH_PATH }}"
+          echo "Checking $URL ..."
+          for i in {1..30}; do
+            if curl -fsS "$URL" >/dev/null; then
+              echo "TARGET healthy"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Health check failed" >&2
+          exit 1
+
+      - name: Swap ACTIVE -> TARGET
+        if: ${{ inputs.swap }}
+        run: |
+          if [ "${ACTIVE_ENV}" = "blue" ]; then SRC="${{ env.BLUE_ENV }}"; NEW=green; else SRC="${{ env.GREEN_ENV }}"; NEW=blue; fi
+          echo ">> Swapping $SRC -> $TARGET_ENV"
+          aws elasticbeanstalk swap-environment-cnames \
+            --source-environment-name "$SRC" \
+            --destination-environment-name "$TARGET_ENV"
+          aws ssm put-parameter --name "${{ env.PARAM_ACTIVE_ENV }}" --type String --value "$NEW" --overwrite
+          echo ">> ACTIVE_ENV (persistido) = $NEW"
