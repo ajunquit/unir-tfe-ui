@@ -1,5 +1,5 @@
 # despliegue blue/green (deploy siempre al inactivo)
-name: deploy-blue-green-eb
+name: cd-aws-deploy-blue-green-eb
 
 on:
   workflow_dispatch:
