@@ -4,21 +4,27 @@ name: deploy-blue-green-eb
 on:
   workflow_dispatch:
     inputs:
+      source:
+        description: "De dónde obtener el artefacto de ci-default"
+        type: choice
+        options: [latest_main, run_id]
+        default: latest_main
+      artifact_run_id:
+        description: "Si source=run_id, indica el run_id del workflow ci-default"
+        required: false
       swap:
-        description: 'Hacer swap Blue -> Green al final si /health está OK'
+        description: "Hacer swap Blue -> Green si /health está OK"
         type: boolean
         default: true
-  push:
-    branches: [ "main" ]
 
 env:
-  AWS_REGION: us-east-2                 # <- región de tu EB (Ohio en tu screenshot)
-  APP_NAME: unir-tfe-blue-green         # <- nombre de tu Application en EB
-  BLUE_ENV: blue-environment            # <- nombre del entorno "Blue"
-  GREEN_ENV: green-environment          # <- nombre del entorno "Green"
-  S3_BUCKET: unir-tfe-bundles           # <- bucket para subir el ZIP
-  HEALTH_PATH: /health                  # <- endpoint de salud de tu app
-  SCHEME: https                         # <- usa http si no tienes certs
+  AWS_REGION: us-east-2                 # Ajusta a tu región (Ohio según tu captura)
+  APP_NAME: unir-tfe-blue-green         # Nombre de la Application en EB
+  BLUE_ENV: blue-environment            # Entorno Blue
+  GREEN_ENV: green-environment          # Entorno Green
+  S3_BUCKET: unir-tfe-bundles           # Bucket donde subiremos el ZIP
+  HEALTH_PATH: /health                  # Endpoint de salud
+  SCHEME: https
 
 jobs:
   deploy-green:
@@ -26,31 +32,24 @@ jobs:
     environment: staging
     concurrency:
       group: eb-deploy
-      cancel-in-progress: false
+    permissions:
+      id-token: write        # Para OIDC
+      contents: read
 
     steps:
-      - name: Checkout
+      - name: Checkout (solo para leer .ebextensions)
         uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.x'
+          fetch-depth: 0
 
-      - name: Build, publish and package
-        run: |
-          dotnet publish ./src/UNIR.TFE.Polyrepo.UI/UNIR.TFE.Polyrepo.UI.csproj -c Release -o publish
-          cp -r .ebextensions publish/.ebextensions
-          cd publish && zip -r ../app.zip . && cd ..
-
-      # Recomendado: OIDC (sin keys), crea un rol en AWS y guarda su ARN en el secret AWS_OIDC_ROLE_ARN
+      # ---- Credenciales AWS (OIDC recomendado) ----
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Alternativa con keys (si no usas OIDC), comenta el bloque anterior y descomenta este:
+      # Alternativa con keys:
       # - name: Configure AWS credentials (keys)
       #   uses: aws-actions/configure-aws-credentials@v4
       #   with:
@@ -58,9 +57,46 @@ jobs:
       #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       #     aws-region: ${{ env.AWS_REGION }}
 
-      - name: Set version label
+      # ---- Descargar artefacto 'net-app' del workflow ci-default ----
+      # Caso A: último run exitoso en main
+      - name: Download artifact from latest successful on main
+        if: ${{ inputs.source == 'latest_main' }}
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: ci-default.yml
+          workflow_conclusion: success
+          branch: main
+          name: net-app
+          path: app_publish
+
+      # Caso B: run_id específico
+      - name: Download artifact by run_id
+        if: ${{ inputs.source == 'run_id' && inputs.artifact_run_id != '' }}
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          run_id: ${{ inputs.artifact_run_id }}
+          name: net-app
+          path: app_publish
+
+      - name: Fail if artifact is empty
+        run: |
+          test -d app_publish && test "$(ls -A app_publish)" || \
+          (echo "Artifact 'net-app' no encontrado o vacío" && exit 1)
+
+      # ---- Inyectar .ebextensions y empaquetar ----
+      - name: Inject .ebextensions and zip
+        run: |
+          # Copia .ebextensions si existe en el repo (opcional)
+          if [ -d ".ebextensions" ]; then
+            cp -r .ebextensions app_publish/.ebextensions
+          fi
+          cd app_publish && zip -r ../app.zip . && cd ..
+          ls -lh app.zip
+
+      - name: Set VERSION_LABEL (único)
         run: echo "VERSION_LABEL=${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}-$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
 
+      # ---- Subir a S3 y crear Application Version ----
       - name: Upload bundle to S3
         run: |
           aws s3 cp app.zip "s3://${{ env.S3_BUCKET }}/${{ env.APP_NAME }}/${{ env.VERSION_LABEL }}.zip"
@@ -78,10 +114,11 @@ jobs:
             --environment-name "${{ env.GREEN_ENV }}" \
             --version-label "${{ env.VERSION_LABEL }}"
 
-      - name: Wait for GREEN environment to finish updating
+      - name: Wait for GREEN to finish updating
         run: |
           aws elasticbeanstalk wait environment-updated --environment-names "${{ env.GREEN_ENV }}"
 
+      # ---- Health check HTTP ----
       - name: HTTP health check (/health)
         run: |
           CNAME=$(aws elasticbeanstalk describe-environments \
@@ -99,6 +136,7 @@ jobs:
           echo "Health check failed" >&2
           exit 1
 
+      # ---- Swap Blue -> Green (opcional) ----
       - name: Swap BLUE -> GREEN
         if: ${{ github.event.inputs.swap != 'false' }}
         run: |
