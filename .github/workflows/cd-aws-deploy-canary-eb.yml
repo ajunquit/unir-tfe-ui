@@ -15,13 +15,14 @@ on:
       artifact_run_id:
         description: "Si source=run_id, indica el run_id del workflow de CI"
         required: false
+      max_wait_minutes:
+        description: "Tiempo máx. de espera (min) para completar el canary"
+        default: "30"
 
 env:
   AWS_REGION: us-east-2
-  # Ajusta estos a tu nuevo entorno de Canary
-  APP_NAME: unir-tfe-canary           # EB Application
-  EB_ENV: qa-env                      # EB Environment (con Traffic Splitting habilitado)
-  # Bucket donde subiremos el ZIP (puede ser el bucket de EB de tu cuenta/region)
+  APP_NAME: unir-tfe-canary                 # EB Application
+  EB_ENV: qa-env                            # EB Environment (con Traffic Splitting)
   S3_BUCKET: elasticbeanstalk-us-east-2-987686462366
   S3_PREFIX: unir-tfe-canary
   HEALTH_PATH: /health
@@ -30,7 +31,6 @@ env:
 jobs:
   canary-deploy:
     runs-on: ubuntu-latest
-    # Usa un Environment con "Required reviewers" para tener APROBACIÓN MANUAL (gate).
     environment: canary
     concurrency:
       group: eb-canary
@@ -95,8 +95,7 @@ jobs:
           test -d app_publish && test "$(ls -A app_publish)" || \
           (echo "Artifact 'net-app' no encontrado o vacío" && exit 1)
 
-      # IMPORTANTE: para Traffic Splitting NO metas .ebextensions que cambien recursos.
-      # El environment ya debe tener configurado HealthCheckPath, ALB, vars, etc.
+      # IMPORTANTE: con Traffic Splitting NO metas .ebextensions que cambien recursos.
       - name: Zip bundle
         run: |
           cd app_publish && zip -r ../app.zip . && cd ..
@@ -115,6 +114,10 @@ jobs:
             --version-label "${{ env.VERSION_LABEL }}" \
             --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ env.S3_PREFIX }}/${{ env.VERSION_LABEL }}.zip"
 
+      # Marcamos hora de inicio para filtrar eventos
+      - name: Mark start time
+        run: echo "START_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
+
       # ⚠️ SOLO actualizamos el environment (sin option-settings) para no chocar con Traffic Splitting
       - name: Update EB environment (Traffic Splitting hará el canary)
         run: |
@@ -122,8 +125,42 @@ jobs:
             --environment-name "${{ env.EB_ENV }}" \
             --version-label "${{ env.VERSION_LABEL }}"
 
-      - name: Wait for environment to finish updating
-        run: aws elasticbeanstalk wait environment-updated --environment-names "${{ env.EB_ENV }}"
+      # 🔁 Waiter “canario”: espera a evento de completion + estado sano
+      - name: Wait for canary to complete (event-based)
+        run: |
+          set -euo pipefail
+          LIMIT_MIN=${{ inputs.max_wait_minutes }}
+          END=$(( $(date +%s) + LIMIT_MIN*60 ))
+          SLEEP=20
+          echo "Esperando hasta ${LIMIT_MIN} min a que termine el canary..."
+
+          while [ $(date +%s) -lt $END ]; do
+            STATUS=$(aws elasticbeanstalk describe-environments \
+              --environment-names "${{ env.EB_ENV }}" \
+              --query 'Environments[0].Status' --output text)
+            HEALTH=$(aws elasticbeanstalk describe-environments \
+              --environment-names "${{ env.EB_ENV }}" \
+              --query 'Environments[0].Health' --output text)
+
+            EVENT=$(aws elasticbeanstalk describe-events \
+              --environment-name "${{ env.EB_ENV }}" \
+              --start-time "${START_TIME}" --max-items 50 \
+              --query "Events[?contains(Message, 'Completed traffic splitting deployment') || \
+                               contains(Message, 'Successfully deployed new application version')].Message" \
+              --output text | head -n1)
+
+            echo "Status=$STATUS Health=$HEALTH Event='${EVENT:-none}'"
+
+            # Completado cuando aparece el evento y el env está Ready + no rojo
+            if [ -n "${EVENT}" ] && [ "$STATUS" = "Ready" ] && { [ "$HEALTH" = "Green" ] || [ "$HEALTH" = "Ok" ]; }; then
+              echo "✔ Canary completado."
+              exit 0
+            fi
+            sleep "$SLEEP"
+          done
+
+          echo "⏰ Timeout esperando a que termine el canary (>${LIMIT_MIN} min)."
+          exit 1
 
       - name: Health check /health (simple)
         run: |
@@ -132,7 +169,6 @@ jobs:
             --query "Environments[0].CNAME" --output text)
           URL="${{ env.SCHEME }}://${CNAME}${{ env.HEALTH_PATH }}"
           echo "Checking $URL ..."
-          # A notar: durante canary, parte del tráfico va al nuevo lote; hacemos un check básico.
           curl -fsS "$URL" >/dev/null && echo "OK" || echo "WARNING: /health no respondió 200"
           echo "EB_URL=${URL%${{ env.HEALTH_PATH }}}" >> $GITHUB_ENV
           echo "CNAME=$CNAME"
