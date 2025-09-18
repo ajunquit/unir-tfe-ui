@@ -1,4 +1,4 @@
-name: cd-aws-canary-eb
+name: cd-aws-deploy-canary-eb
 
 on:
   workflow_dispatch:
