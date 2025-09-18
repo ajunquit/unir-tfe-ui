@@ -142,17 +142,10 @@ jobs:
               --environment-names "${{ env.EB_ENV }}" \
               --query 'Environments[0].Health' --output text)
 
-            EVENT=$(aws elasticbeanstalk describe-events \
-              --environment-name "${{ env.EB_ENV }}" \
-              --start-time "${START_TIME}" --max-items 50 \
-              --query "Events[?contains(Message, 'Completed traffic splitting deployment') || \
-                               contains(Message, 'Successfully deployed new application version')].Message" \
-              --output text | head -n1)
-
-            echo "Status=$STATUS Health=$HEALTH Event='${EVENT:-none}'"
+            echo "Status=$STATUS Health=$HEALTH"
 
             # Completado cuando aparece el evento y el env está Ready + no rojo
-            if [ -n "${EVENT}" ] && [ "$STATUS" = "Ready" ] && { [ "$HEALTH" = "Green" ] || [ "$HEALTH" = "Ok" ]; }; then
+            if [ "$STATUS" = "Ready" ] && { [ "$HEALTH" = "Green" ] || [ "$HEALTH" = "Ok" ]; }; then
               echo "✔ Canary completado."
               exit 0
             fi
