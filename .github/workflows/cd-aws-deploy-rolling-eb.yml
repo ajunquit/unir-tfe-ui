@@ -1,4 +1,4 @@
-name: cd-aws-deploy-canary-eb
+name: cd-aws-deploy-rolling-eb
 
 on:
   workflow_dispatch:
@@ -16,24 +16,25 @@ on:
         description: "Si source=run_id, indica el run_id del workflow de CI"
         required: false
       max_wait_minutes:
-        description: "Tiempo máx. de espera (min) para completar el canary"
+        description: "Tiempo máx. de espera (min) hasta Ready+Version"
         default: "30"
 
 env:
   AWS_REGION: us-east-2
-  APP_NAME: unir-tfe-canary                 # EB Application
-  EB_ENV: qa-env                            # EB Environment (con Traffic Splitting)
+  APP_NAME: unir-tfe-rolling
+  EB_ENV: staging-env
   S3_BUCKET: elasticbeanstalk-us-east-2-987686462366
-  S3_PREFIX: unir-tfe-canary
+  S3_PREFIX: unir-tfe-rolling
   HEALTH_PATH: /health
   SCHEME: http
 
 jobs:
-  canary-deploy:
+  rolling-deploy:
     runs-on: ubuntu-latest
-    environment: canary
+    # Usa un Environment protegido para approvals si quieres (Settings > Environments)
+    environment: rolling
     concurrency:
-      group: eb-canary
+      group: eb-rolling
       cancel-in-progress: true
     permissions:
       id-token: write
@@ -69,7 +70,7 @@ jobs:
           name: net-app
           path: app_publish
 
-      # --- Fuente 3: build aquí mismo (si no usas CI aparte) ---
+      # --- Fuente 3: build aquí mismo ---
       - name: Checkout repo en la rama elegida
         if: ${{ inputs.source == 'build_here' }}
         uses: actions/checkout@v4
@@ -95,7 +96,7 @@ jobs:
           test -d app_publish && test "$(ls -A app_publish)" || \
           (echo "Artifact 'net-app' no encontrado o vacío" && exit 1)
 
-      # IMPORTANTE: con Traffic Splitting NO metas .ebextensions que cambien recursos.
+      # IMPORTANTE: el policy Rolling se configura en EB; aquí solo subimos código.
       - name: Zip bundle
         run: |
           cd app_publish && zip -r ../app.zip . && cd ..
@@ -114,46 +115,50 @@ jobs:
             --version-label "${{ env.VERSION_LABEL }}" \
             --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ env.S3_PREFIX }}/${{ env.VERSION_LABEL }}.zip"
 
-      # Marcamos hora de inicio para filtrar eventos
-      - name: Mark start time
-        run: echo "START_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
+      # Evita redeploy innecesario
+      - name: Skip if version already running
+        id: skipcheck
+        run: |
+          CURR=$(aws elasticbeanstalk describe-environments \
+            --environment-names "${{ env.EB_ENV }}" \
+            --query 'Environments[0].VersionLabel' --output text)
+          echo "Current version: $CURR"
+          if [ "$CURR" = "${VERSION_LABEL}" ]; then
+            echo "already=true" >> $GITHUB_OUTPUT
+          else
+            echo "already=false" >> $GITHUB_OUTPUT
+          fi
 
-      # ⚠️ SOLO actualizamos el environment (sin option-settings) para no chocar con Traffic Splitting
-      - name: Update EB environment (Traffic Splitting hará el canary)
+      - name: Update EB environment (Rolling hará el despliegue por lotes)
+        if: steps.skipcheck.outputs.already == 'false'
         run: |
           aws elasticbeanstalk update-environment \
             --environment-name "${{ env.EB_ENV }}" \
             --version-label "${{ env.VERSION_LABEL }}"
 
-      # 🔁 Waiter “canario”: espera a evento de completion + estado sano
-      - name: Wait for canary to complete (event-based)
+      # Espera robusta: READY + VersionLabel coincide + salud OK
+      - name: Wait for Rolling to complete (status+version)
+        if: steps.skipcheck.outputs.already == 'false'
         run: |
           set -euo pipefail
           LIMIT_MIN=${{ inputs.max_wait_minutes }}
           END=$(( $(date +%s) + LIMIT_MIN*60 ))
-          SLEEP=20
-          echo "Esperando hasta ${LIMIT_MIN} min a que termine el canary..."
-
+          SLEEP=15
+          echo "Esperando hasta ${LIMIT_MIN} min a que el environment quede Ready con la nueva versión..."
           while [ $(date +%s) -lt $END ]; do
-            STATUS=$(aws elasticbeanstalk describe-environments \
-              --environment-names "${{ env.EB_ENV }}" \
-              --query 'Environments[0].Status' --output text)
-            HEALTH=$(aws elasticbeanstalk describe-environments \
-              --environment-names "${{ env.EB_ENV }}" \
-              --query 'Environments[0].Health' --output text)
-
-            echo "Status=$STATUS Health=$HEALTH"
-
-            # Completado cuando aparece el evento y el env está Ready + no rojo
-            if [ "$STATUS" = "Ready" ] && { [ "$HEALTH" = "Green" ] || [ "$HEALTH" = "Ok" ]; }; then
-              echo "✔ Canary completado."
-              exit 0
+            read STATUS HEALTH CURR <<< "$(aws elasticbeanstalk describe-environments \
+              --environment-names '${{ env.EB_ENV }}' \
+              --query 'Environments[0].[Status,Health,VersionLabel]' --output text)"
+            echo "Status=$STATUS Health=$HEALTH Version=$CURR"
+            if [ "$STATUS" = "Ready" ] && [ "$CURR" = "${VERSION_LABEL}" ] && { [ "$HEALTH" = "Green" ] || [ "$HEALTH" = "Ok" ]; }; then
+              echo "✔ Ready con ${VERSION_LABEL}"; exit 0
+            fi
+            if [ "$HEALTH" = "Severe" ] || [ "$HEALTH" = "Degraded" ]; then
+              echo "✖ Salud degradada: $HEALTH"; exit 1
             fi
             sleep "$SLEEP"
           done
-
-          echo "⏰ Timeout esperando a que termine el canary (>${LIMIT_MIN} min)."
-          exit 1
+          echo "⏰ Timeout esperando Ready + ${VERSION_LABEL}"; exit 1
 
       - name: Health check /health (simple)
         run: |
@@ -165,6 +170,14 @@ jobs:
           curl -fsS "$URL" >/dev/null && echo "OK" || echo "WARNING: /health no respondió 200"
           echo "EB_URL=${URL%${{ env.HEALTH_PATH }}}" >> $GITHUB_ENV
           echo "CNAME=$CNAME"
+
+      - name: Dump EB events on failure
+        if: failure()
+        run: |
+          aws elasticbeanstalk describe-events \
+            --environment-name "${{ env.EB_ENV }}" \
+            --max-items 25 \
+            --query 'Events[].{Time:EventDate,Msg:Message}' --output table
 
       - name: Summary
         run: |
