@@ -1,0 +1,187 @@
+name: cd-aws-deploy-rolling-eb
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_branch:
+        description: "Rama a desplegar (gate)"
+        default: "main"
+        required: true
+      source:
+        description: "Origen del paquete"
+        type: choice
+        options: [latest_on_branch, run_id, build_here]
+        default: latest_on_branch
+      artifact_run_id:
+        description: "Si source=run_id, indica el run_id del workflow de CI"
+        required: false
+      max_wait_minutes:
+        description: "Tiempo máx. de espera (min) hasta Ready+Version"
+        default: "30"
+
+env:
+  AWS_REGION: us-east-2
+  APP_NAME: unir-tfe-rolling
+  EB_ENV: staging-env
+  S3_BUCKET: elasticbeanstalk-us-east-2-987686462366
+  S3_PREFIX: unir-tfe-rolling
+  HEALTH_PATH: /health
+  SCHEME: http
+
+jobs:
+  rolling-deploy:
+    runs-on: ubuntu-latest
+    # Usa un Environment protegido para approvals si quieres (Settings > Environments)
+    environment: rolling
+    concurrency:
+      group: eb-rolling
+      cancel-in-progress: true
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+      packages: read
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-${{ github.run_id }}
+
+      # --- Fuente 1: último artifact exitoso en la rama seleccionada (tu CI "ci-default.yml") ---
+      - name: Download artifact from latest successful on branch
+        if: ${{ inputs.source == 'latest_on_branch' }}
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: ci-default.yml
+          workflow_conclusion: success
+          branch: ${{ inputs.deploy_branch }}
+          name: net-app
+          path: app_publish
+
+      # --- Fuente 2: artifact por run_id específico ---
+      - name: Download artifact by run_id
+        if: ${{ inputs.source == 'run_id' && inputs.artifact_run_id != '' }}
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          run_id: ${{ inputs.artifact_run_id }}
+          name: net-app
+          path: app_publish
+
+      # --- Fuente 3: build aquí mismo ---
+      - name: Checkout repo en la rama elegida
+        if: ${{ inputs.source == 'build_here' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.deploy_branch }}
+          fetch-depth: 0
+
+      - name: Setup .NET 8
+        if: ${{ inputs.source == 'build_here' }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build & Publish (build_here)
+        if: ${{ inputs.source == 'build_here' }}
+        run: |
+          dotnet restore
+          dotnet publish -c Release -o app_publish
+
+      # --- Verificación de artifact ---
+      - name: Fail if artifact is empty
+        run: |
+          test -d app_publish && test "$(ls -A app_publish)" || \
+          (echo "Artifact 'net-app' no encontrado o vacío" && exit 1)
+
+      # IMPORTANTE: el policy Rolling se configura en EB; aquí solo subimos código.
+      - name: Zip bundle
+        run: |
+          cd app_publish && zip -r ../app.zip . && cd ..
+          ls -lh app.zip
+
+      - name: Set VERSION_LABEL
+        run: echo "VERSION_LABEL=${{ inputs.deploy_branch }}-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}-$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
+
+      - name: Upload bundle to S3
+        run: aws s3 cp app.zip "s3://${{ env.S3_BUCKET }}/${{ env.S3_PREFIX }}/${{ env.VERSION_LABEL }}.zip"
+
+      - name: Create EB application version
+        run: |
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ env.APP_NAME }}" \
+            --version-label "${{ env.VERSION_LABEL }}" \
+            --source-bundle S3Bucket="${{ env.S3_BUCKET }}",S3Key="${{ env.S3_PREFIX }}/${{ env.VERSION_LABEL }}.zip"
+
+      # Evita redeploy innecesario
+      - name: Skip if version already running
+        id: skipcheck
+        run: |
+          CURR=$(aws elasticbeanstalk describe-environments \
+            --environment-names "${{ env.EB_ENV }}" \
+            --query 'Environments[0].VersionLabel' --output text)
+          echo "Current version: $CURR"
+          if [ "$CURR" = "${VERSION_LABEL}" ]; then
+            echo "already=true" >> $GITHUB_OUTPUT
+          else
+            echo "already=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update EB environment (Rolling hará el despliegue por lotes)
+        if: steps.skipcheck.outputs.already == 'false'
+        run: |
+          aws elasticbeanstalk update-environment \
+            --environment-name "${{ env.EB_ENV }}" \
+            --version-label "${{ env.VERSION_LABEL }}"
+
+      # Espera robusta: READY + VersionLabel coincide + salud OK
+      - name: Wait for Rolling to complete (status+version)
+        if: steps.skipcheck.outputs.already == 'false'
+        run: |
+          set -euo pipefail
+          LIMIT_MIN=${{ inputs.max_wait_minutes }}
+          END=$(( $(date +%s) + LIMIT_MIN*60 ))
+          SLEEP=15
+          echo "Esperando hasta ${LIMIT_MIN} min a que el environment quede Ready con la nueva versión..."
+          while [ $(date +%s) -lt $END ]; do
+            read STATUS HEALTH CURR <<< "$(aws elasticbeanstalk describe-environments \
+              --environment-names '${{ env.EB_ENV }}' \
+              --query 'Environments[0].[Status,Health,VersionLabel]' --output text)"
+            echo "Status=$STATUS Health=$HEALTH Version=$CURR"
+            if [ "$STATUS" = "Ready" ] && [ "$CURR" = "${VERSION_LABEL}" ] && { [ "$HEALTH" = "Green" ] || [ "$HEALTH" = "Ok" ]; }; then
+              echo "✔ Ready con ${VERSION_LABEL}"; exit 0
+            fi
+            if [ "$HEALTH" = "Severe" ] || [ "$HEALTH" = "Degraded" ]; then
+              echo "✖ Salud degradada: $HEALTH"; exit 1
+            fi
+            sleep "$SLEEP"
+          done
+          echo "⏰ Timeout esperando Ready + ${VERSION_LABEL}"; exit 1
+
+      - name: Health check /health (simple)
+        run: |
+          CNAME=$(aws elasticbeanstalk describe-environments \
+            --environment-names "${{ env.EB_ENV }}" \
+            --query "Environments[0].CNAME" --output text)
+          URL="${{ env.SCHEME }}://${CNAME}${{ env.HEALTH_PATH }}"
+          echo "Checking $URL ..."
+          curl -fsS "$URL" >/dev/null && echo "OK" || echo "WARNING: /health no respondió 200"
+          echo "EB_URL=${URL%${{ env.HEALTH_PATH }}}" >> $GITHUB_ENV
+          echo "CNAME=$CNAME"
+
+      - name: Dump EB events on failure
+        if: failure()
+        run: |
+          aws elasticbeanstalk describe-events \
+            --environment-name "${{ env.EB_ENV }}" \
+            --max-items 25 \
+            --query 'Events[].{Time:EventDate,Msg:Message}' --output table
+
+      - name: Summary
+        run: |
+          echo "App:      $APP_NAME"
+          echo "Env:      $EB_ENV"
+          echo "Version:  $VERSION_LABEL"
+          echo "URL:      $EB_URL"
