@@ -1,22 +1,14 @@
-using UNIR.TFE.Polyrepo.Addition.Module.Application;
-using UNIR.TFE.Polyrepo.Division.Module.Application;
-using UNIR.TFE.Polyrepo.Multiplication.Module.Application;
-using UNIR.TFE.Polyrepo.Subtraction.Module.Application;
-using UNIR.TFE.Polyrepo.UI.Infrastructure.External.GitHub;
-using UNIR.TFE.Polyrepo.UI.Infrastructure.External.GitHub.Impl;
+using UNIR.TFE.Polyrepo.Orchestrator.Module;
+using UNIR.TFE.Polyrepo.UI;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddControllersWithViews();
 
-builder.Services.AddScoped<IAdditionAppService, AdditionAppService>();
-builder.Services.AddScoped<ISubtractionAppService, SubtractionAppService>();
-builder.Services.AddScoped<IMultiplicationAppService, MultiplicationAppService>();
-builder.Services.AddScoped<IDivisionAppService, DivisionAppService>();
-builder.Services.AddScoped<IGitRepositoryAnalyzerService, GitRepositoryAnalyzerService>();
-builder.Services.AddScoped<IGitHubRepositoryService, GitHubRepositoryService>();
-builder.Services.AddScoped<IGitHubUrlParser, GitHubUrlParser>();
+builder.Services
+    .AddInfrastructureModule()
+    .AddOrchestratorModule();
 
 builder.Services.AddHttpClient();
 
