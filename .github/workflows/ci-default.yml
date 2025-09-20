@@ -34,14 +34,9 @@ jobs:
         env:
           NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Restore
-        run: |
-          dotnet restore \
-            --source "https://api.nuget.org/v3/index.json" \
-            --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
-
+      # ---------- Cache NuGet + snapshot previo (para estimar % de hit) ----------
       - name: Cache NuGet
-        id: cache_nuget
+        id: nuget_cache
         uses: actions/cache@v4
         with:
           path: ~/.nuget/packages
@@ -49,33 +44,48 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nuget-
 
+      - name: Snapshot NuGet packages (pre-restore)
+        run: |
+          mkdir -p .cache-metrics
+          find ~/.nuget/packages -maxdepth 2 -mindepth 2 -type d 2>/dev/null \
+            | sed 's#.*/packages/##' \
+            | tr '[:upper:]' '[:lower:]' \
+            | sort > .cache-metrics/pre.txt || true
+
+      - name: Mostrar sources (debug)
+        run: dotnet nuget list source
+
+      # ---------- Restore / Build / Test con cobertura ----------
+      - name: Restore
+        run: |
+          dotnet restore \
+            --source "https://api.nuget.org/v3/index.json" \
+            --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
-      # --- Tests + cobertura (TRX + cobertura XML con data collector) ---
       - name: Test (with coverage)
         run: |
-          dotnet test --configuration Release --no-build \
+          dotnet test --configuration Release --no-build --verbosity normal \
             --logger "trx;LogFileName=test_results.trx" \
-            --collect "XPlat Code Coverage" \
+            --collect:"XPlat Code Coverage" \
             --results-directory ./TestResults
 
-      # --- Generar reporte HTML de cobertura ---
-      - name: Install ReportGenerator
-        run: dotnet tool install -g dotnet-reportgenerator-globaltool
+      # ---------- Generar reporte de cobertura (MarkdownSummary + HTML) ----------
+      - name: Generate coverage summary
+        uses: danielpalme/ReportGenerator-GitHub-Action@v5
+        with:
+          reports: '**/TestResults/**/coverage.cobertura.xml'
+          targetdir: 'coveragereport'
+          reporttypes: 'MarkdownSummary;HtmlInline_AzurePipelines'
 
-      - name: Add dotnet tools to PATH
-        run: echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
-
-      - name: Build coverage HTML
+      - name: Add coverage to Job Summary
         run: |
-          mkdir -p coverage-html
-          reportgenerator \
-            -reports:"TestResults/**/coverage.cobertura.xml" \
-            -targetdir:"coverage-html" \
-            -reporttypes:"HtmlInline;TextSummary"
+          echo "## Code Coverage" >> $GITHUB_STEP_SUMMARY
+          cat coveragereport/Summary.md >> $GITHUB_STEP_SUMMARY
 
-      # --- Publicar artefactos requeridos ---
+      # ---------- Artefactos requeridos ----------
       - name: Upload test-results
         uses: actions/upload-artifact@v4
         with:
@@ -85,36 +95,48 @@ jobs:
             TestResults/**/coverage.cobertura.xml
           if-no-files-found: error
 
-      - name: Upload coverage-html
+      - name: Upload coverage HTML
         uses: actions/upload-artifact@v4
         with:
           name: coverage-html
-          path: coverage-html
+          path: coveragereport
           if-no-files-found: error
 
-      # --- Resumen en el Job Summary ---
-      - name: Code Coverage y Cache NuGet (summary)
+      # ---------- Resumen de Cache NuGet (HIT/MISS y % estimado) ----------
+      - name: Compute NuGet cache hit %
         run: |
-          {
-            echo "## Code Coverage y Cache NuGet"
-            echo
-            if [ -f "coverage-html/Summary.txt" ]; then
-              echo "### Cobertura"
-              echo '```'
-              cat coverage-html/Summary.txt
-              echo '```'
-              echo
-              echo "**Reporte HTML**: descargable desde el artefacto \`coverage-html\` (abrir \`index.html\`)."
-              echo
-            else
-              echo "_No se encontró \`Summary.txt\` de cobertura._"
-              echo
-            fi
-            echo "### Cache NuGet"
-            echo "- **cache-hit**: \`${{ steps.cache_nuget.outputs['cache-hit'] || 'false' }}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          SOLUTION=$(ls *.sln | head -n 1)
+          if [ -n "$SOLUTION" ]; then
+            dotnet list "$SOLUTION" package --include-transitive --format json > .cache-metrics/list.json
+            jq -r '
+              [.projects[].frameworks[] 
+                | (.topLevelPackages + .transitivePackages // [])
+                | .[] | "\(.id | ascii_downcase)/\(.resolvedVersion | ascii_downcase)"
+              ] | unique | .[]' .cache-metrics/list.json > .cache-metrics/required.txt
+          else
+            # Si no hay .sln en raíz, evita fallo
+            touch .cache-metrics/required.txt
+          fi
 
-      # --- Publicación del artefacto app (como ya tenías) ---
+          comm -12 .cache-metrics/pre.txt .cache-metrics/required.txt > .cache-metrics/hit.txt || true
+
+          total=$(wc -l < .cache-metrics/required.txt | tr -d ' ')
+          hits=$(wc -l < .cache-metrics/hit.txt | tr -d ' ')
+          pct=0
+          if [ "$total" -gt 0 ]; then
+            pct=$(awk -v h="$hits" -v t="$total" 'BEGIN{printf("%.0f", (h*100.0)/t)}')
+          fi
+
+          {
+            echo "## Cache NuGet"
+            echo
+            echo "- Acción cache: **${{ steps.nuget_cache.outputs.cache-hit == 'true' && 'HIT' || 'MISS' }}**"
+            echo "- Paquetes requeridos: **$total**"
+            echo "- Presentes desde caché (pre-restore): **$hits**"
+            echo "- **Cache hit estimado:** $pct%"
+          } >> $GITHUB_STEP_SUMMARY
+
+      # ---------- Publicación app (igual que antes) ----------
       - name: Publish
         run: dotnet publish -c Release -o ${{ github.workspace }}/publish
 
@@ -125,7 +147,7 @@ jobs:
           path: ${{ github.workspace }}/publish
           if-no-files-found: error
 
-      # --- si viene del white-label, empaqueta metadata para el CD ---
+      # ---------- Metadata para CD cuando viene por repository_dispatch ----------
       - name: Export deploy metadata (only for repository_dispatch)
         if: ${{ github.event_name == 'repository_dispatch' }}
         run: |
@@ -137,7 +159,6 @@ jobs:
             --arg murl  "${{ github.event.client_payload.manifest_url || '' }}" \
             '{environment:$env, azure_webapp_name:$app, ref:$ref, release_tag:$rtag, manifest_url:$murl}' \
             > deploy-metadata.json
-        shell: bash
 
       - name: Upload deploy metadata
         if: ${{ github.event_name == 'repository_dispatch' }}
