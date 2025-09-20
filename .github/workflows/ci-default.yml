@@ -41,6 +41,7 @@ jobs:
             --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
 
       - name: Cache NuGet
+        id: cache_nuget
         uses: actions/cache@v4
         with:
           path: ~/.nuget/packages
@@ -51,19 +52,79 @@ jobs:
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
-      - name: Test
-        run: dotnet test --configuration Release --no-build --verbosity normal
+      # --- Tests + cobertura (TRX + cobertura XML con data collector) ---
+      - name: Test (with coverage)
+        run: |
+          dotnet test --configuration Release --no-build \
+            --logger "trx;LogFileName=test_results.trx" \
+            --collect "XPlat Code Coverage" \
+            --results-directory ./TestResults
 
+      # --- Generar reporte HTML de cobertura ---
+      - name: Install ReportGenerator
+        run: dotnet tool install -g dotnet-reportgenerator-globaltool
+
+      - name: Add dotnet tools to PATH
+        run: echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
+
+      - name: Build coverage HTML
+        run: |
+          mkdir -p coverage-html
+          reportgenerator \
+            -reports:"TestResults/**/coverage.cobertura.xml" \
+            -targetdir:"coverage-html" \
+            -reporttypes:"HtmlInline;TextSummary"
+
+      # --- Publicar artefactos requeridos ---
+      - name: Upload test-results
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            TestResults/**/*.trx
+            TestResults/**/coverage.cobertura.xml
+          if-no-files-found: error
+
+      - name: Upload coverage-html
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage-html
+          if-no-files-found: error
+
+      # --- Resumen en el Job Summary ---
+      - name: Code Coverage y Cache NuGet (summary)
+        run: |
+          {
+            echo "## Code Coverage y Cache NuGet"
+            echo
+            if [ -f "coverage-html/Summary.txt" ]; then
+              echo "### Cobertura"
+              echo '```'
+              cat coverage-html/Summary.txt
+              echo '```'
+              echo
+              echo "**Reporte HTML**: descargable desde el artefacto \`coverage-html\` (abrir \`index.html\`)."
+              echo
+            else
+              echo "_No se encontró \`Summary.txt\` de cobertura._"
+              echo
+            fi
+            echo "### Cache NuGet"
+            echo "- **cache-hit**: \`${{ steps.cache_nuget.outputs['cache-hit'] || 'false' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --- Publicación del artefacto app (como ya tenías) ---
       - name: Publish
         run: dotnet publish -c Release -o ${{ github.workspace }}/publish
 
-      - name: Upload artifact
+      - name: Upload artifact (app)
         uses: actions/upload-artifact@v4
         with:
           name: net-app
           path: ${{ github.workspace }}/publish
           if-no-files-found: error
-          
+
       # --- si viene del white-label, empaqueta metadata para el CD ---
       - name: Export deploy metadata (only for repository_dispatch)
         if: ${{ github.event_name == 'repository_dispatch' }}
